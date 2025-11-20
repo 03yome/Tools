@@ -1,0 +1,219 @@
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+
+local player = Players.LocalPlayer
+local guardians = {}
+local GUARDIAN_SPEED = 50
+local ATTACK_RANGE = 10
+local ATTACK_COOLDOWN = 0.016    -- ~60 hit/giây
+local DAMAGE = 9999              -- 9999 damage
+local CIRCLE_RADIUS = 6
+local DETECTION_RANGE = 50       -- TĂNG LÊN 50 studs
+
+local function removeGuardianFromList(g)
+    for i = #guardians, 1, -1 do
+        if guardians[i] == g then
+            table.remove(guardians, i)
+            break
+        end
+    end
+end
+
+local function getAllNPCs()
+    local npcs = {}
+    local playersList = Players:GetPlayers()
+    for _, v in pairs(workspace:GetDescendants()) do
+        if v:IsA("Model") and v:FindFirstChild("Humanoid") and v:FindFirstChild("HumanoidRootPart") then
+            local isPlayer = false
+            for _, plr in pairs(playersList) do
+                if plr.Character == v then
+                    isPlayer = true
+                    break
+                end
+            end
+            if not isPlayer then
+                table.insert(npcs, v)
+            end
+        end
+    end
+    return npcs
+end
+
+local function createHappyFaceGui(parentPart)
+    local billboard = Instance.new("BillboardGui")
+    billboard.Name = "GuardianFace"
+    billboard.Size = UDim2.new(0, 80, 0, 80)
+    billboard.AlwaysOnTop = true
+    billboard.StudsOffset = Vector3.new(0, 0.9, 0)
+    billboard.Parent = parentPart
+
+    local frame = Instance.new("Frame")
+    frame.Size = UDim2.new(1, 0, 1, 0)
+    frame.BackgroundTransparency = 1
+    frame.Parent = billboard
+
+    local label = Instance.new("TextLabel")
+    label.Size = UDim2.new(1, 0, 1, 0)
+    label.BackgroundTransparency = 1
+    label.Text = "☺"
+    label.TextScaled = true
+    label.TextColor3 = Color3.fromRGB(255, 255, 255)
+    label.Font = Enum.Font.GothamBold
+    label.Parent = frame
+end
+
+function createGuardian()
+    local char = player.Character or player.CharacterAdded:Wait()
+    if not char or not char:FindFirstChild("HumanoidRootPart") then return end
+
+    local guardian = Instance.new("Part")
+    guardian.Size = Vector3.new(2, 2, 2)
+    guardian.Shape = Enum.PartType.Ball
+    guardian.Name = "Guardian"
+    guardian.Anchored = false
+    guardian.CanCollide = false
+    guardian.Transparency = 0
+    guardian.BrickColor = BrickColor.new("Bright blue")
+    guardian.Position = char.HumanoidRootPart.Position + Vector3.new(0, 0.5, 0)
+    guardian.Parent = workspace
+
+    local bodyVel = Instance.new("BodyVelocity")
+    bodyVel.MaxForce = Vector3.new(1e6, 1e6, 1e6)
+    bodyVel.Velocity = Vector3.new(0, 0, 0)
+    bodyVel.Parent = guardian
+
+    createHappyFaceGui(guardian)
+
+    table.insert(guardians, guardian)
+
+    local focusNPC = nil
+    local attackDebounce = false
+    local stopped = false
+
+    local ancestryConn = guardian.AncestryChanged:Connect(function(_, parent)
+        if not guardian:IsDescendantOf(game) then
+            stopped = true
+            removeGuardianFromList(guardian)
+            if ancestryConn then ancestryConn:Disconnect() end
+        end
+    end)
+
+    local charRemovingConn = player.CharacterRemoving:Connect(function()
+        if guardian and guardian.Parent then
+            guardian:Destroy()
+        end
+    end)
+
+    task.spawn(function()
+        while not stopped and guardian and guardian.Parent do
+            local char = player.Character
+            if not char or not char:FindFirstChild("HumanoidRootPart") then
+                task.wait(0.1)
+                continue
+            end
+
+            local myIndex = table.find(guardians, guardian) or 1
+            local total = #guardians
+            local angle = (2 * math.pi / math.max(total, 1)) * (myIndex - 1)
+            local followPos = char.HumanoidRootPart.Position
+            local circleOffset = Vector3.new(math.cos(angle), 0, math.sin(angle)) * CIRCLE_RADIUS + Vector3.new(0, 0.5, 0)
+            local homePos = followPos + circleOffset
+
+            if focusNPC and focusNPC.Parent and focusNPC:FindFirstChild("Humanoid") and focusNPC.Humanoid.Health > 0 then
+                local ok, npcPos = pcall(function()
+                    return focusNPC.HumanoidRootPart.Position + Vector3.new(0, 0.5, 0)
+                end)
+
+                if ok and npcPos then
+                    local toNpc = npcPos - guardian.Position
+                    if toNpc.Magnitude > ATTACK_RANGE then
+                        if toNpc.Magnitude > 0.1 then
+                            bodyVel.Velocity = toNpc.Unit * GUARDIAN_SPEED
+                        else
+                            bodyVel.Velocity = Vector3.new(0, 0, 0)
+                        end
+                    else
+                        guardian.Position = npcPos + Vector3.new(0, 0.1, 0)
+                        bodyVel.Velocity = Vector3.new(0, 0, 0)
+
+                        if not attackDebounce then
+                            attackDebounce = true
+                            task.spawn(function()
+                                if focusNPC and focusNPC:FindFirstChild("Humanoid") then
+                                    local hum = focusNPC.Humanoid
+                                    hum:TakeDamage(DAMAGE) -- Chỉ dùng TakeDamage → NPC chết tự nhiên
+                                end
+                            end)
+                            task.wait(ATTACK_COOLDOWN)
+                            attackDebounce = false
+                        end
+                    end
+                else
+                    focusNPC = nil
+                end
+            else
+                -- Quay về vị trí vòng tròn
+                local toHome = homePos - guardian.Position
+                if toHome.Magnitude > 0.1 then
+                    bodyVel.Velocity = toHome.Unit * GUARDIAN_SPEED
+                else
+                    bodyVel.Velocity = Vector3.new(0, 0, 0)
+                end
+
+                -- Tìm NPC gần nhất trong phạm vi 50 studs ✅
+                local nearestNPC = nil
+                local nearestDist = math.huge
+                for _, v in pairs(getAllNPCs()) do
+                    if v and v:FindFirstChild("Humanoid") and v:FindFirstChild("HumanoidRootPart") and v.Humanoid.Health > 0 then
+                        local ok, dist = pcall(function()
+                            return (guardian.Position - v.HumanoidRootPart.Position).Magnitude
+                        end)
+                        if ok and dist and dist < nearestDist and dist <= DETECTION_RANGE then
+                            nearestDist = dist
+                            nearestNPC = v
+                        end
+                    end
+                end
+                focusNPC = nearestNPC
+            end
+
+            -- Anti-stuck
+            if (guardian.Position - homePos).Magnitude > 50 or guardian.Position.Y < -50 then
+                guardian.Position = homePos
+                bodyVel.Velocity = Vector3.new(0, 0, 0)
+            end
+
+            task.wait(0.03)
+        end
+
+        if guardian and guardian.Parent then guardian:Destroy() end
+        if ancestryConn then ancestryConn:Disconnect() end
+        if charRemovingConn then charRemovingConn:Disconnect() end
+        removeGuardianFromList(guardian)
+    end)
+end
+
+-- Nút spawn
+function createSpawnButton()
+    local screenGui = Instance.new("ScreenGui")
+    screenGui.Name = "GuardianSpawnGUI"
+    screenGui.ResetOnSpawn = false
+    screenGui.Parent = player:WaitForChild("PlayerGui")
+
+    local btn = Instance.new("TextButton")
+    btn.Size = UDim2.new(0, 160, 0, 40)
+    btn.Position = UDim2.new(0.5, -80, 0.8, 0)
+    btn.Text = "SPAWN GUARDIAN"
+    btn.BackgroundColor3 = Color3.fromRGB(40, 120, 220)
+    btn.TextColor3 = Color3.new(1, 1, 1)
+    btn.Font = Enum.Font.SourceSansBold
+    btn.TextSize = 22
+    btn.Parent = screenGui
+
+    btn.MouseButton1Click:Connect(function()
+        createGuardian()
+    end)
+end
+
+createSpawnButton()
+createGuardian() -- Tự spawn 1 con khi vào game
